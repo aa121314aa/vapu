@@ -115,6 +115,7 @@ local state = {
     open = true, scale = 1,
     language = "en", translated = {}, languageObservers = {}, panels = {},
     mobile = false, virtualW = 1280, virtualH = 720, opacity = 0, backgrounds = {},
+    tweens = setmetatable({}, {__mode = "k"}),
 }
 -- Only the UI is translated; stable English category/module IDs remain unchanged.
 local zh = {
@@ -237,15 +238,34 @@ local function tint(obj, color)
     if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then obj.ImageColor3 = color
     else obj.TextColor3 = color end
 end
-local function animate(obj, props)
-    Tween:Create(obj, TweenInfo.new(0.16, Enum.EasingStyle.Linear), props):Play()
+-- Eased UI-only tween helper. It cancels an older tween on the same object so rapid input stays responsive.
+local function animate(obj, props, duration, style, direction)
+    local previous = state.tweens[obj]
+    if previous then previous:Cancel() end
+    local tween = Tween:Create(obj, TweenInfo.new(
+        duration or 0.22,
+        style or Enum.EasingStyle.Quart,
+        direction or Enum.EasingDirection.Out
+    ), props)
+    state.tweens[obj] = tween
+    tween.Completed:Connect(function()
+        if state.tweens[obj] == tween then state.tweens[obj] = nil end
+    end)
+    tween:Play()
+    return tween
 end
-local function clampFrame(frame, proposedX, proposedY)
+local function clampFrame(frame, proposedX, proposedY, smooth)
     local width = frame.Size.X.Offset
     local height = frame.Size.Y.Offset
     local x = math.clamp(proposedX or frame.Position.X.Offset, 0, math.max(0, state.virtualW - width))
     local y = math.clamp(proposedY or frame.Position.Y.Offset, 0, math.max(0, state.virtualH - height))
-    frame.Position = UDim2.fromOffset(x, y)
+    local position = UDim2.fromOffset(x, y)
+    if smooth then
+        -- Short eased follow adds a little damping without changing game state.
+        animate(frame, {Position = position}, 0.11, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+    else
+        frame.Position = position
+    end
 end
 local function drag(frame, handle)
     local active, start, initial = false, nil, nil
@@ -259,7 +279,7 @@ local function drag(frame, handle)
         local delta = input.Position - start
         local sc = math.max(state.scale, 0.1)
         clampFrame(frame, initial.X.Offset + delta.X / sc,
-            initial.Y.Offset + delta.Y / sc)
+            initial.Y.Offset + delta.Y / sc, true)
     end))
     table.insert(state.connections, UIS.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then active = false end
@@ -269,6 +289,7 @@ local scaled = make("Frame", {BackgroundTransparency = 1, Size = UDim2.fromScale
 local scale = make("UIScale", {Scale = 1}, scaled)
 local userScale = 1
 local surface = make("Frame", {BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1)}, scaled)
+local surfaceMotion = make("UIScale", {Scale = 1}, surface)
 local function fit()
     local cam = workspace.CurrentCamera
     if not cam then return end
@@ -312,12 +333,33 @@ local toast = make("TextLabel", {BackgroundColor3 = state.main, BackgroundTransp
 corner(toast)
 border(toast)
 local toastSequence = 0
+local toastMotion = make("UIScale", {Scale = 1}, toast)
 local function notify(message)
     toastSequence += 1
     local sequence = toastSequence
     toast.Text = message
     toast.Visible = true
-    task.delay(2.8, function() if toastSequence == sequence and toast.Parent then toast.Visible = false end end)
+    toast.TextTransparency = 1
+    toast.BackgroundTransparency = 1
+    toastMotion.Scale = 0.94
+    animate(toast, {
+        TextTransparency = 0,
+        BackgroundTransparency = math.max(0.06, state.opacity),
+    }, 0.2)
+    animate(toastMotion, {Scale = 1}, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    task.delay(2.8, function()
+        if toastSequence ~= sequence or not toast.Parent then return end
+        animate(toast, {TextTransparency = 1, BackgroundTransparency = 1}, 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        animate(toastMotion, {Scale = 0.96}, 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        task.delay(0.21, function()
+            if toastSequence == sequence and toast.Parent then
+                toast.Visible = false
+                toast.TextTransparency = 0
+                toast.BackgroundTransparency = math.max(0.06, state.opacity)
+                toastMotion.Scale = 1
+            end
+        end)
+    end)
 end
 
 local main = make("Frame", {Name = "MainWindow", BackgroundColor3 = state.main,
@@ -356,6 +398,13 @@ local function panel(title, x, y, width, height)
         BorderSizePixel = 0, Position = UDim2.fromOffset(x, y),
         Size = UDim2.fromOffset(width, height), Visible = false}, surface)
     corner(frame); border(frame)
+    local motionScale = make("UIScale", {Scale = 1}, frame)
+    frame:GetPropertyChangedSignal("Visible"):Connect(function()
+        if frame.Visible and frame.Parent then
+            motionScale.Scale = 0.94
+            animate(motionScale, {Scale = 1}, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+        end
+    end)
     state.panels[#state.panels + 1] = frame
     frame:GetPropertyChangedSignal("Size"):Connect(function()
         if frame.Parent then clampFrame(frame) end
@@ -509,8 +558,12 @@ local function createModule(category, moduleName, content)
     row.MouseButton1Click:Connect(function() module:Toggle() end)
     row.MouseButton2Click:Connect(function() module:Expand() end)
     dots.MouseButton1Click:Connect(function() module:Expand() end)
-    row.MouseEnter:Connect(function() if not module.Enabled then row.BackgroundColor3 = Color3.fromRGB(31, 30, 31) end end)
-    row.MouseLeave:Connect(function() if not module.Enabled then row.BackgroundColor3 = state.main end end)
+    row.MouseEnter:Connect(function()
+        if not module.Enabled then animate(row, {BackgroundColor3 = Color3.fromRGB(31, 30, 31)}, 0.14) end
+    end)
+    row.MouseLeave:Connect(function()
+        if not module.Enabled then animate(row, {BackgroundColor3 = state.main}, 0.18) end
+    end)
     return module
 end
 local navIndex = 0
@@ -525,8 +578,12 @@ local function navRow(title, iconName, glyph, callback)
     tint(symbol, state.dim)
     local arrow = icon(row, "expandarrow", "›", 201, 16, 5, 8)
     tint(arrow, Color3.fromRGB(102, 102, 102))
-    row.MouseEnter:Connect(function() row.BackgroundTransparency = 0; row.BackgroundColor3 = Color3.fromRGB(32, 31, 32) end)
-    row.MouseLeave:Connect(function() row.BackgroundTransparency = 1 end)
+    row.MouseEnter:Connect(function()
+        animate(row, {BackgroundTransparency = 0, BackgroundColor3 = Color3.fromRGB(32, 31, 32)}, 0.16)
+    end)
+    row.MouseLeave:Connect(function()
+        animate(row, {BackgroundTransparency = 1}, 0.18)
+    end)
     row.MouseButton1Click:Connect(function() callback(row, symbol) end)
     return row
 end
@@ -930,10 +987,26 @@ mobileBack.MouseButton1Click:Connect(function()
     main.Visible = true
 end)
 fit()
+local visibilitySequence = 0
 function api:SetVisible(visible)
     state.open = not not visible
-    surface.Visible = state.open
-    launcher.Visible = not state.open
+    visibilitySequence += 1
+    local sequence = visibilitySequence
+    if state.open then
+        surface.Visible = true
+        launcher.Visible = false
+        surfaceMotion.Scale = 0.96
+        animate(surfaceMotion, {Scale = 1}, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    else
+        launcher.Visible = true
+        animate(surfaceMotion, {Scale = 0.97}, 0.17, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        task.delay(0.18, function()
+            if sequence == visibilitySequence and not state.open and surface.Parent then
+                surface.Visible = false
+                surfaceMotion.Scale = 1
+            end
+        end)
+    end
 end
 function api:Destroy()
     if state.activeSettings and state.activeSettings.Close then state.activeSettings.Close() end
