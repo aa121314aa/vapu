@@ -1,39 +1,48 @@
-# Vape V4 风格 UI 仿制项目（Roblox Luau）
+# Vapu：手机 / PC 自适应 Vape 风格 UI 与原版桥接
 
-参考项目：[7GrandDadPGN/VapeV4ForRoblox](https://github.com/7GrandDadPGN/VapeV4ForRoblox)，按本次拉取的 `9e7828f` 版本的 `src/guis/new/` 界面结构制作。原仓库的代码和图标依 CC0 1.0 发布；随包保留 `REFERENCE_LICENSE_CC0.txt`。本项目是独立写的 **UI 外壳**，不是原项目的加载器或功能脚本。
+这是一个 Roblox Luau 客户端 UI 项目，参考 [7GrandDadPGN/VapeV4ForRoblox](https://github.com/7GrandDadPGN/VapeV4ForRoblox) 的 `src/guis/new/` 界面风格。图标和参考代码的许可信息见 [`REFERENCE_LICENSE_CC0.txt`](REFERENCE_LICENSE_CC0.txt)。本项目并非原项目的官方发行版。
 
-## 内容
+## 文件
 
-- `Main.lua` — 独立客户端 Luau 入口；仅创建本地 ScreenGui。
-- `assets/*.png` — 取自参考仓库的界面图标和 mini logo；有 `getcustomasset`/`getsynasset` 时显示原图，无这类接口时使用文字回退。
-- `REFERENCE_LICENSE_CC0.txt` — 参考项目许可证。
+- `Main.lua`：自适应界面、搜索、主题/语言/缩放/透明度设置，以及可选的原版模块适配。
+- `NativeBridgeLoader.lua`：先尝试启动上游运行核心，再加载本项目界面；模块实现仍来自上游，不是本仓库内置副本。
+- `RemoteLoader.lua`：远程启动 `NativeBridgeLoader.lua` 的便捷入口。
+- `assets/`：界面 PNG 图标。
 
-## 使用
+## 启动
 
-1. 把整个 `VapeUIClone` 文件夹复制进执行器的脚本文件系统（保留 `VapeUIClone/assets/` 路径）。
-2. 在 Roblox **客户端**运行：
+发布到仓库 `main` 分支后，可从客户端执行以下入口：
+
+```luau
+loadstring(game:HttpGet("https://raw.githubusercontent.com/aa121314aa/vapu/main/RemoteLoader.lua"))()
+```
+
+也可直接调用桥接入口：
+
+```luau
+loadstring(game:HttpGet("https://raw.githubusercontent.com/aa121314aa/vapu/main/NativeBridgeLoader.lua"))()
+```
+
+桥接会尝试从上游下载并运行 `NewMainScript.lua`，最多等待 15 秒让 `shared.vape.Modules` 初始化，然后隐藏原版 ClickGui、保留原版运行核心并加载本仓库的 `Main.lua`。如果运行核心没有成功初始化，界面仍会打开，但 Blatant 与 Overlays 的原版开关会保持禁用并提示；不会显示假启用状态。默认远程链接指向 `main`，发布到其他分支时需相应修改脚本中的 raw URL。
+
+只运行视觉界面时，可将 `Main.lua` 和 `assets/` 放在执行器文件系统的 `VapeUIClone/` 目录，再运行：
 
 ```luau
 loadstring(readfile("VapeUIClone/Main.lua"))()
 ```
 
-也可以将 `Main.lua` 的源码粘贴到 Roblox Studio 的 `StarterPlayerScripts` 下的 `LocalScript`。Studio 中本地 PNG 不会自动加载，会显示文字图标回退；若追求图标相似度，应使用带 `getcustomasset`/`getsynasset` 的本地资源环境。无需网络请求。
+此模式不主动加载原版运行核心。能够写入文件的环境会尝试缓存 PNG；否则会回退到 Roblox 图片资源 ID。除 Blatant / Overlays 外，其余分类仍是界面占位，不执行游戏功能。也可将 `Main.lua` 放入 Roblox Studio 的客户端 `LocalScript` 中进行界面测试；执行器专用 API 和原版桥接在 Studio 中不可用。
 
-## 范围与交互
+## 界面与桥接范围
 
-- 六大主分类：Combat、Blatant、Render、Utility、World、Inventory；另有 Friends、Profiles、Targets、Overlays 和搜索框/Legit 入口。
-- 220px 窄栏、独立拖拽分类窗、深色背景、青绿色主题、模块开关/右键设置、搜索定位、主题色切换、GUI 缩放、RightShift 显隐。
-- 模块名称取自参考项目的通用模块目录作**视觉占位**；Inventory 在通用目录没有对应模块，因此保留空分类供后续游戏专属模块接入。
-- 每个开关**只改变界面状态**：不修改角色、相机、武器、服务器或游戏网络请求；配置列表仅存于本次运行内存中。界面并未逐像素复刻参考项目所有子面板/动画，也不承诺 100% 像素一致。
-- 重复执行入口会删除上一次的 `VapeUIClone` 界面后创建新界面。要彻底清理本次运行的全局按键监听，可保留脚本返回的 API 并调用 `api:Destroy()`（见下一节）。
+- 自动识别手机和桌面视口；手机分类窗口单页展示，拖动窗口会限制在可见范围内。
+- 最小化后可用右下角 **V4** 按钮恢复；`RightShift` 可显隐界面。
+- 支持中英文、主题色、缩放、透明度、本地列表/配置界面，以及模块搜索。
+- 桥接 16 个通用 Blatant 模块及上游存在的 Overlay 开关/控件。其余 Combat、Render、Utility、World、Inventory 等分类仅为 UI 占位。
+- 重复运行会清理上一份自定义界面；配置和列表仅保存在当前运行内存中，语言可写入 `VapeUIClone/language.txt`。
 
-## 可选接入接口
+## 安全与验证
 
-```luau
-local api = loadstring(readfile("VapeUIClone/Main.lua"))()
-api:SetVisible(true)  -- 显示界面
-api:CreateModule("Combat", "YourModule")  -- 仅添加视觉占位模块
-api:Destroy() -- 卸载界面和输入监听
-```
+**远程桥接会使用 `game:HttpGet` 和 `loadstring` 下载并执行代码**：包括上游仓库的 `NewMainScript.lua`，以及本仓库 `main` 分支上的 `Main.lua`。上游代码及远程分支内容可能变化；运行前请自行检查来源和代码，只在你信任且获准的环境中使用。使用游戏修改工具可能违反 Roblox 或具体游戏的规则。
 
-该项目尚未在 Roblox/执行器中实际运行验证，仅通过 Luau 静态解析及源码检查。
+本项目不是自包含的游戏功能实现。上游 API 变化、执行器兼容性、手机实际操作和游戏内效果均未在 Roblox 客户端中验证；请勿将静态源码检查视为运行验证。
