@@ -1,7 +1,7 @@
--- Vape V4 UI study / standalone visual shell. No gameplay modules, network calls, hooks, or remote firing.
+-- Vape V4-inspired UI layer. Downloads/caches icons; real Blatant/Overlay logic is delegated to upstream runtime when loaded.
 -- Reference: https://github.com/7GrandDadPGN/VapeV4ForRoblox (CC0 1.0).
--- Place this file AND assets/ in the executor filesystem at VapeUIClone/, then run:
--- loadstring(readfile("VapeUIClone/Main.lua"))()
+-- Upload this Main.lua and NativeBridgeLoader.lua to aa121314aa/vapu; execute the bridge for real modules.
+-- Directly executing Main.lua without the bridge opens the UI but blocks unbacked Blatant/Overlay toggles.
 -- In Studio: paste this source into a LocalScript under StarterPlayerScripts (icons fall back to text).
 
 local Players = game:GetService("Players")
@@ -18,6 +18,82 @@ end
 if type(environment.__VapeUIClone) == "table" and type(environment.__VapeUIClone.Destroy) == "function" then
     pcall(function() environment.__VapeUIClone:Destroy() end)
 end
+-- Download local assets BEFORE placing menu images. Native asset IDs are used if an executor cannot mount local images.
+local assetBase = "https://raw.githubusercontent.com/aa121314aa/vapu/main/assets/"
+local iconIds = {
+    blatant = "rbxassetid://126929923309265",
+    close = "rbxassetid://121816018671466",
+    combat = "rbxassetid://94762732349053",
+    downexpand = "rbxassetid://94197751291504",
+    edit = "rbxassetid://105801951237137",
+    expandarrow = "rbxassetid://86360332526471",
+    friends = "rbxassetid://92957214042038",
+    inventory = "rbxassetid://93264756888499",
+    notification = "rbxassetid://90300780458781",
+    overlays = "rbxassetid://136535637407545",
+    pin = "rbxassetid://92459145800579",
+    profiles = "rbxassetid://126051451865127",
+    render = "rbxassetid://125472576898654",
+    search = "rbxassetid://115611852955611",
+    settingdots = "rbxassetid://130896840048276",
+    settings = "rbxassetid://73820177347303",
+    theme = "rbxassetid://111525258317113",
+    utility = "rbxassetid://108303206513893",
+    v4mini = "rbxassetid://115213099001611",
+    vapelogomini = "rbxassetid://109041903452149",
+    world = "rbxassetid://118917453153459",
+    targetinfo = "rbxassetid://121604266095276",
+    textgui = "rbxassetid://99438663817412",
+    radar = "rbxassetid://97983828696086",
+ }
+local boot = Instance.new("ScreenGui")
+boot.Name = "VapeUIBoot"
+boot.ResetOnSpawn = false
+boot.DisplayOrder = 9001
+boot.Parent = parent
+local progress = Instance.new("TextLabel")
+progress.BackgroundColor3 = Color3.fromRGB(26, 25, 26)
+progress.BackgroundTransparency = 0.16
+progress.AnchorPoint = Vector2.new(0.5, 0.5)
+progress.Position = UDim2.fromScale(0.5, 0.5)
+progress.Size = UDim2.fromOffset(290, 52)
+progress.TextColor3 = Color3.fromRGB(200, 200, 200)
+progress.TextSize = 14
+progress.Font = Enum.Font.Arial
+progress.Text = "Vape UI · Initializing..."
+progress.Parent = boot
+local preloadedIcons = {}
+local canWrite = type(writefile) == "function" and type(makefolder) == "function"
+if canWrite then
+    pcall(makefolder, "VapeUIClone")
+    pcall(makefolder, "VapeUIClone/assets")
+end
+for index, name in ipairs({"blatant", "close", "combat", "downexpand", "edit", "expandarrow", "friends", "inventory", "notification", "overlays", "pin", "profiles", "render", "search", "settingdots", "settings", "theme", "utility", "v4mini", "vapelogomini", "world"}) do
+    progress.Text = ("Vape UI · assets %d/%d"):format(index, 21)
+    local path = "VapeUIClone/assets/" .. name .. ".png"
+    if canWrite then
+        local valid = false
+        if type(readfile) == "function" then
+            local ok, bytes = pcall(readfile, path)
+            valid = ok and type(bytes) == "string" and bytes:sub(1, 8) == "\137PNG\r\n\26\n"
+        end
+        if not valid then
+            local ok, bytes = pcall(function() return game:HttpGet(assetBase .. name .. ".png") end)
+            if ok and type(bytes) == "string" and bytes:sub(1, 8) == "\137PNG\r\n\26\n" then
+                pcall(writefile, path, bytes)
+            end
+        end
+    end
+    local getAsset = getcustomasset or getsynasset
+    if type(getAsset) == "function" then
+        local ok, result = pcall(getAsset, path)
+        if ok and type(result) == "string" and result ~= "" then preloadedIcons[name] = result end
+    end
+    preloadedIcons[name] = preloadedIcons[name] or iconIds[name]
+end
+progress.Text = "Vape UI · Opening..."
+boot:Destroy()
+
 local existing = parent:FindFirstChild("VapeUIClone")
 if existing then existing:Destroy() end
 
@@ -37,7 +113,9 @@ local state = {
     windows = {}, modules = {}, connections = {},
     profiles = {default = {}}, profile = "default", lists = {Friends = {}, Targets = {}},
     open = true, scale = 1,
-    language = "en", translated = {}, languageObservers = {},
+    language = "en", translated = {}, languageObservers = {}, panels = {},
+    mobile = false, virtualW = 1280, virtualH = 720, opacity = 0, backgrounds = {},
+    tweens = setmetatable({}, {__mode = "k"}),
 }
 -- Only the UI is translated; stable English category/module IDs remain unchanged.
 local zh = {
@@ -71,8 +149,9 @@ local zh = {
     ['Profile name'] = "配置名称", ['Roblox username'] = "Roblox 用户名",
     ['Search modules...'] = "搜索模块…", ['No matching modules'] = "没有匹配的模块",
     GENERAL = "通用设置", ['Rebind GUI'] = "界面热键", ['GUI Theme'] = "界面主题",
-    ['GUI Scale'] = "界面缩放", ['Language'] = "语言", misc = "其他",
-    ['UI DEMO ONLY'] = "仅界面演示", ['Modules change their visual state only.'] = "模块开关仅改变界面状态。",
+    ['GUI Scale'] = "界面缩放", ['Language'] = "语言", ['UI Opacity'] = "界面透明度", misc = "其他",
+    ['UI / Native Bridge'] = "界面 / 原版桥接",
+    ['Blatant & Overlays use original runtime.'] = "暴力与悬浮窗依赖原版运行核心。",
 }
 local function translate(key)
     return state.language == "zh-CN" and (zh[key] or key) or key
@@ -99,11 +178,22 @@ local function readLanguage()
 end
 readLanguage()
 local api = {Gui = ui, State = state}
+-- NativeBridgeLoader populates the real upstream engine before this UI is created.
+local native = type(shared) == "table" and shared.vape or nil
+if type(native) == "table" and type(native.Modules) == "table" then
+    state.native = native
+end
 
 local function make(className, properties, container)
     local object = Instance.new(className)
     for key, value in pairs(properties or {}) do object[key] = value end
     object.Parent = container
+    if object:IsA("GuiObject") and properties and properties.BackgroundColor3
+        and (properties.BackgroundTransparency or 0) < 1 then
+        local base = properties.BackgroundTransparency or 0
+        state.backgrounds[#state.backgrounds + 1] = {object = object, base = base}
+        object.BackgroundTransparency = math.max(base, state.opacity)
+    end
     return object
 end
 local function corner(obj, radius)
@@ -128,16 +218,19 @@ local function btn(parentObject, content, x, y, w, h)
         Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h)}, parentObject)
 end
 local function icon(parentObject, name, fallback, x, y, w, h)
-    local asset = nil
-    local getAsset = getcustomasset or getsynasset
-    if type(getAsset) == "function" then
-        local ok, result = pcall(getAsset, "VapeUIClone/assets/" .. name .. ".png")
-        if ok and type(result) == "string" then asset = result end
-    end
+    local asset = preloadedIcons[name] or iconIds[name]
     if asset then
-        return make("ImageLabel", {BackgroundTransparency = 1, Image = asset,
+        local picture = make("ImageLabel", {BackgroundTransparency = 1, Image = asset,
             ImageColor3 = state.text, Position = UDim2.fromOffset(x, y),
             Size = UDim2.fromOffset(w, h)}, parentObject)
+        -- Some executors return an unusable local ContentId without raising an error.
+        -- Prefer a real image ID over an emoji if local loading has not succeeded.
+        if iconIds[name] and asset ~= iconIds[name] then
+            task.delay(3, function()
+                if picture.Parent and not picture.IsLoaded then picture.Image = iconIds[name] end
+            end)
+        end
+        return picture
     end
     return label(parentObject, fallback or "·", x, y - 2, w + 3, h + 4, 15, state.text)
 end
@@ -145,8 +238,34 @@ local function tint(obj, color)
     if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then obj.ImageColor3 = color
     else obj.TextColor3 = color end
 end
-local function animate(obj, props)
-    Tween:Create(obj, TweenInfo.new(0.16, Enum.EasingStyle.Linear), props):Play()
+-- Eased UI-only tween helper. It cancels an older tween on the same object so rapid input stays responsive.
+local function animate(obj, props, duration, style, direction)
+    local previous = state.tweens[obj]
+    if previous then previous:Cancel() end
+    local tween = Tween:Create(obj, TweenInfo.new(
+        duration or 0.22,
+        style or Enum.EasingStyle.Quart,
+        direction or Enum.EasingDirection.Out
+    ), props)
+    state.tweens[obj] = tween
+    tween.Completed:Connect(function()
+        if state.tweens[obj] == tween then state.tweens[obj] = nil end
+    end)
+    tween:Play()
+    return tween
+end
+local function clampFrame(frame, proposedX, proposedY, smooth)
+    local width = frame.Size.X.Offset
+    local height = frame.Size.Y.Offset
+    local x = math.clamp(proposedX or frame.Position.X.Offset, 0, math.max(0, state.virtualW - width))
+    local y = math.clamp(proposedY or frame.Position.Y.Offset, 0, math.max(0, state.virtualH - height))
+    local position = UDim2.fromOffset(x, y)
+    if smooth then
+        -- Short eased follow adds a little damping without changing game state.
+        animate(frame, {Position = position}, 0.11, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+    else
+        frame.Position = position
+    end
 end
 local function drag(frame, handle)
     local active, start, initial = false, nil, nil
@@ -159,8 +278,8 @@ local function drag(frame, handle)
         if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
         local delta = input.Position - start
         local sc = math.max(state.scale, 0.1)
-        frame.Position = UDim2.new(initial.X.Scale, initial.X.Offset + delta.X / sc,
-            initial.Y.Scale, initial.Y.Offset + delta.Y / sc)
+        clampFrame(frame, initial.X.Offset + delta.X / sc,
+            initial.Y.Offset + delta.Y / sc, true)
     end))
     table.insert(state.connections, UIS.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then active = false end
@@ -170,14 +289,36 @@ local scaled = make("Frame", {BackgroundTransparency = 1, Size = UDim2.fromScale
 local scale = make("UIScale", {Scale = 1}, scaled)
 local userScale = 1
 local surface = make("Frame", {BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1)}, scaled)
+local surfaceMotion = make("UIScale", {Scale = 1}, surface)
 local function fit()
     local cam = workspace.CurrentCamera
     if not cam then return end
     local viewport = cam.ViewportSize
-    local n = math.clamp(math.min(viewport.X / 1220, viewport.Y / 760), 0.6, 1)
+    state.mobile = viewport.X < 850 or (UIS.TouchEnabled and viewport.X < 1200)
+    local n
+    if state.mobile then
+        n = math.clamp(math.min(viewport.X / 390, viewport.Y / 690), 0.75, 1.1)
+    else
+        n = math.clamp(math.min(viewport.X / 1100, viewport.Y / 760), 0.62, 1)
+    end
     state.scale = n * userScale
+    state.virtualW = viewport.X / state.scale
+    state.virtualH = viewport.Y / state.scale
     scale.Scale = state.scale
     surface.Size = UDim2.fromScale(1 / state.scale, 1 / state.scale)
+    for _, frame in ipairs(state.panels) do
+        if frame.Parent then
+            if state.mobile and frame ~= state.mainFrame then
+                clampFrame(frame, 14, 60)
+            else
+                clampFrame(frame)
+            end
+        end
+    end
+    if state.mobileBack then
+        state.mobileBack.Visible = state.mobile and state.open
+        state.mobileBack.Position = UDim2.fromOffset(math.max(4, state.virtualW - 53), 14)
+    end
 end
 fit()
 table.insert(state.connections, workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(fit))
@@ -192,12 +333,33 @@ local toast = make("TextLabel", {BackgroundColor3 = state.main, BackgroundTransp
 corner(toast)
 border(toast)
 local toastSequence = 0
+local toastMotion = make("UIScale", {Scale = 1}, toast)
 local function notify(message)
     toastSequence += 1
     local sequence = toastSequence
     toast.Text = message
     toast.Visible = true
-    task.delay(2.8, function() if toastSequence == sequence and toast.Parent then toast.Visible = false end end)
+    toast.TextTransparency = 1
+    toast.BackgroundTransparency = 1
+    toastMotion.Scale = 0.94
+    animate(toast, {
+        TextTransparency = 0,
+        BackgroundTransparency = math.max(0.06, state.opacity),
+    }, 0.2)
+    animate(toastMotion, {Scale = 1}, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    task.delay(2.8, function()
+        if toastSequence ~= sequence or not toast.Parent then return end
+        animate(toast, {TextTransparency = 1, BackgroundTransparency = 1}, 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        animate(toastMotion, {Scale = 0.96}, 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        task.delay(0.21, function()
+            if toastSequence == sequence and toast.Parent then
+                toast.Visible = false
+                toast.TextTransparency = 0
+                toast.BackgroundTransparency = math.max(0.06, state.opacity)
+                toastMotion.Scale = 1
+            end
+        end)
+    end)
 end
 
 local main = make("Frame", {Name = "MainWindow", BackgroundColor3 = state.main,
@@ -205,6 +367,8 @@ local main = make("Frame", {Name = "MainWindow", BackgroundColor3 = state.main,
     BorderSizePixel = 0}, surface)
 corner(main)
 border(main)
+state.mainFrame = main
+state.panels[#state.panels + 1] = main
 local mainHeader = btn(main, "", 0, 0, 220, 39)
 drag(main, mainHeader)
 local brand = icon(main, "vapelogomini", "vape", 12, 11, 55, 16)
@@ -216,7 +380,7 @@ settingsButton.TextSize = 20
 settingsButton.TextColor3 = Color3.fromRGB(125, 125, 125)
 local closeButton = btn(main, "−", 149, 0, 24, 39)
 closeButton.TextSize = 20
-closeButton.MouseButton1Click:Connect(function() surface.Visible = false; state.open = false end)
+closeButton.MouseButton1Click:Connect(function() api:SetVisible(false) end)
 
 local mainList = make("Frame", {Name = "Navigation", BackgroundTransparency = 1,
     Position = UDim2.fromOffset(0, 37), Size = UDim2.new(1, 0, 1, -37)}, main)
@@ -234,6 +398,18 @@ local function panel(title, x, y, width, height)
         BorderSizePixel = 0, Position = UDim2.fromOffset(x, y),
         Size = UDim2.fromOffset(width, height), Visible = false}, surface)
     corner(frame); border(frame)
+    local motionScale = make("UIScale", {Scale = 1}, frame)
+    frame:GetPropertyChangedSignal("Visible"):Connect(function()
+        if frame.Visible and frame.Parent then
+            motionScale.Scale = 0.94
+            animate(motionScale, {Scale = 1}, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+        end
+    end)
+    state.panels[#state.panels + 1] = frame
+    frame:GetPropertyChangedSignal("Size"):Connect(function()
+        if frame.Parent then clampFrame(frame) end
+    end)
+    if state.mobile then clampFrame(frame, 14, 60) else clampFrame(frame) end
     local header = btn(frame, "", 0, 0, width, 40)
     drag(frame, header)
     bindText(label(frame, title, 34, 0, width - 70, 40, 13), title)
@@ -252,6 +428,89 @@ local function scroll(frame, top)
     end)
     return view, layout
 end
+local overlayNames = {TextGUI = "Text GUI", TargetInfo = "Target Info", SessionInfo = "Session Info"}
+local function overlayWindow(name)
+    local native = state.native
+    local scaledGui = native and native.gui and native.gui:FindFirstChild("ScaledGui")
+    return scaledGui and scaledGui:FindFirstChild(name .. "Overlay")
+end
+local function nativeFor(module)
+    local native = state.native
+    if not native then return nil end
+    if module.Category == "Overlays" then
+        return native.Overlays and native.Overlays.Options
+            and native.Overlays.Options[overlayNames[module.Name] or module.Name]
+    end
+    return native.Modules and native.Modules[module.Name]
+end
+local function openModuleSettings(module)
+    if state.activeSettings and state.activeSettings.Close then state.activeSettings.Close() end
+    local bridgedCategory = module.Category == "Blatant" or module.Category == "Overlays"
+    local native = bridgedCategory and nativeFor(module) or nil
+    local frame = panel(module.Name, state.mobile and 14 or 712, 60, 300, 395)
+    frame.Visible = true
+    local header = frame:FindFirstChildWhichIsA("TextLabel")
+    if header then bindText(header, module.Name) end
+    local close = btn(frame, "×", 265, 0, 33, 39)
+    close.TextSize = 20
+    local list, _ = scroll(frame, 42)
+    local originalParents = {}
+    local function closeSettings()
+        for _, data in ipairs(originalParents) do
+            if data.object and data.object.Parent then
+                pcall(function()
+                    data.object.Parent = data.parent
+                    if data.layoutOrder ~= nil then data.object.LayoutOrder = data.layoutOrder end
+                end)
+            end
+        end
+        frame:Destroy()
+        state.activeSettings = nil
+    end
+    close.MouseButton1Click:Connect(closeSettings)
+    state.activeSettings = {Frame = frame, Close = closeSettings}
+    if type(native) == "table" and type(native.Toggle) == "function" then
+        -- Move the real option controls temporarily; retain upstream callbacks and slider logic.
+        local objects = {}
+        if module.Category == "Overlays" then
+            local win = overlayWindow(overlayNames[module.Name] or module.Name)
+            local originalList = win and win:FindFirstChild("Children")
+            if originalList then
+                for _, obj in ipairs(originalList:GetChildren()) do
+                    if obj:IsA("GuiObject") then objects[#objects + 1] = obj end
+                end
+            end
+        elseif type(native.Options) == "table" then
+            local options = {}
+            for _, option in pairs(native.Options) do
+                if type(option) == "table" and typeof(option.Object) == "Instance"
+                    and option.Object:IsA("GuiObject") then
+                    options[#options + 1] = option
+                end
+            end
+            table.sort(options, function(a, b) return (a.Index or 0) < (b.Index or 0) end)
+            for _, option in ipairs(options) do objects[#objects + 1] = option.Object end
+        end
+        for index, obj in ipairs(objects) do
+            originalParents[#originalParents + 1] = {
+                object = obj, parent = obj.Parent, layoutOrder = obj.LayoutOrder,
+            }
+            obj.Parent = list
+            obj.LayoutOrder = index
+        end
+        if #objects == 0 then
+            label(list, state.language == "zh-CN" and "该模块没有额外设置" or "No additional settings", 12, 10, 270, 42, 12, state.dim)
+        end
+    else
+        local message = bridgedCategory
+            and (state.language == "zh-CN" and "需运行 NativeBridgeLoader，才能使用真实模块设置" or
+                "Native module unavailable. Run NativeBridgeLoader.")
+            or (state.language == "zh-CN" and "该分类为界面占位，没有原版设置" or
+                "UI-only module; no native settings are available.")
+        label(list, message, 12, 10, 270, 66, 12, state.dim)
+    end
+    clampFrame(frame)
+end
 local moduleCounter = 0
 local function createModule(category, moduleName, content)
     moduleCounter += 1
@@ -262,50 +521,49 @@ local function createModule(category, moduleName, content)
     bindText(row, moduleName, "   ")
     row.TextColor3 = state.dim
     row.BackgroundColor3 = state.main
-    row.BackgroundTransparency = 0
+    row.BackgroundTransparency = state.opacity
+    state.backgrounds[#state.backgrounds + 1] = {object = row, base = 0}
     local dots = btn(slot, "⋮", 190, 0, 30, 40)
     dots.TextSize = 19
-    local detail = make("Frame", {BackgroundColor3 = Color3.fromRGB(22, 21, 22),
-        BorderSizePixel = 0, Position = UDim2.fromOffset(0, 40),
-        Size = UDim2.fromOffset(220, 83), Visible = false}, slot)
-    local key = bindText(btn(detail, "Keybind: None", 12, 8, 195, 30), "Keybind: None")
-    key.TextXAlignment = Enum.TextXAlignment.Left
-    local hint = bindText(label(detail, "UI preview only · no gameplay effect", 12, 42, 205, 25, 11, state.dim),
-        "UI preview only · no gameplay effect")
-    hint.TextTruncate = Enum.TextTruncate.AtEnd
-    local module = {Name = moduleName, Category = category, Enabled = false, Expanded = false, Row = row, Slot = slot}
+    local module = {Name = moduleName, Category = category, Enabled = false, Row = row, Slot = slot}
     state.modules[moduleName] = module
     function module:Toggle()
-        self.Enabled = not self.Enabled
+        local requiresNative = self.Category == "Blatant" or self.Category == "Overlays"
+        local native = requiresNative and nativeFor(self) or nil
+        if requiresNative then
+            if type(native) ~= "table" or type(native.Toggle) ~= "function" then
+                notify(state.language == "zh-CN" and "原生功能未加载，已阻止假开关" or
+                    "Native module unavailable; toggle blocked")
+                return
+            end
+            local ok, err = pcall(function() native:Toggle() end)
+            if not ok then notify("Native module error: " .. tostring(err)); return end
+            self.Enabled = native.Enabled == true
+            if self.Category == "Overlays" then
+                local win = overlayWindow(overlayNames[self.Name] or self.Name)
+                if win then win.Visible = self.Enabled end
+            end
+        else
+            self.Enabled = not self.Enabled -- Other categories retain their explicit visual-only state.
+        end
         animate(row, {BackgroundColor3 = self.Enabled and state.accent or state.main,
             TextColor3 = self.Enabled and Color3.fromRGB(16, 23, 21) or state.dim})
         dots.TextColor3 = self.Enabled and Color3.fromRGB(16, 23, 21) or state.dim
-        local message = state.language == "zh-CN"
-            and (self.Enabled and "已开启（仅界面）" or "已关闭（仅界面）")
-            or (self.Enabled and "ON (UI only)" or "OFF (UI only)")
-        notify(translate(self.Name) .. " · " .. message)
+        local suffix = requiresNative and " (native)" or " (UI only)"
+        notify(translate(self.Name) .. " · " .. (self.Enabled and "ON" or "OFF") .. suffix)
     end
     function module:Expand()
-        self.Expanded = not self.Expanded
-        detail.Visible = self.Expanded
-        slot.Size = UDim2.fromOffset(220, self.Expanded and 123 or 40)
-        row.BackgroundColor3 = self.Enabled and state.accent or state.main
-        notify(translate(self.Name) .. (state.language == "zh-CN"
-            and " 设置 · 仅界面演示" or " settings · visual only"))
+        openModuleSettings(self)
     end
     row.MouseButton1Click:Connect(function() module:Toggle() end)
     row.MouseButton2Click:Connect(function() module:Expand() end)
     dots.MouseButton1Click:Connect(function() module:Expand() end)
-    local keyClicked = false
-    onLanguageChange(function()
-        if keyClicked and key.Parent then key.Text = translate("Keybind: unassigned (demo)") end
+    row.MouseEnter:Connect(function()
+        if not module.Enabled then animate(row, {BackgroundColor3 = Color3.fromRGB(31, 30, 31)}, 0.14) end
     end)
-    key.MouseButton1Click:Connect(function()
-        keyClicked = true
-        key.Text = translate("Keybind: unassigned (demo)")
+    row.MouseLeave:Connect(function()
+        if not module.Enabled then animate(row, {BackgroundColor3 = state.main}, 0.18) end
     end)
-    row.MouseEnter:Connect(function() if not module.Enabled then row.BackgroundColor3 = Color3.fromRGB(31, 30, 31) end end)
-    row.MouseLeave:Connect(function() if not module.Enabled then row.BackgroundColor3 = state.main end end)
     return module
 end
 local navIndex = 0
@@ -320,8 +578,12 @@ local function navRow(title, iconName, glyph, callback)
     tint(symbol, state.dim)
     local arrow = icon(row, "expandarrow", "›", 201, 16, 5, 8)
     tint(arrow, Color3.fromRGB(102, 102, 102))
-    row.MouseEnter:Connect(function() row.BackgroundTransparency = 0; row.BackgroundColor3 = Color3.fromRGB(32, 31, 32) end)
-    row.MouseLeave:Connect(function() row.BackgroundTransparency = 1 end)
+    row.MouseEnter:Connect(function()
+        animate(row, {BackgroundTransparency = 0, BackgroundColor3 = Color3.fromRGB(32, 31, 32)}, 0.16)
+    end)
+    row.MouseLeave:Connect(function()
+        animate(row, {BackgroundTransparency = 1}, 0.18)
+    end)
     row.MouseButton1Click:Connect(function() callback(row, symbol) end)
     return row
 end
@@ -353,7 +615,12 @@ for index, item in ipairs(categoryData) do
     end
     local row
     row = navRow(name, image, glyph, function()
-        window.Visible = not window.Visible
+        local opening = not window.Visible
+        if state.mobile and opening then
+            for _, frame in ipairs(state.panels) do if frame ~= main then frame.Visible = false end end
+            clampFrame(window, 14, 60)
+        end
+        window.Visible = opening
         row.TextColor3 = window.Visible and state.accent or state.dim
         if window.Visible and name == "Inventory" then resize() end
     end)
@@ -423,6 +690,10 @@ for _, listName in ipairs({"Friends", "Profiles", "Targets"}) do
     local p = createListPanel(listName)
     local row
     row = navRow(listName, listName == "Profiles" and "profiles" or "friends", "♧", function()
+        if state.mobile and not p.Visible then
+            for _, frame in ipairs(state.panels) do if frame ~= main then frame.Visible = false end end
+            clampFrame(p, 14, 60)
+        end
         p.Visible = not p.Visible
         row.TextColor3 = p.Visible and state.accent or state.dim
     end)
@@ -438,11 +709,27 @@ local overlayList = scroll(overlayPanel, 41)
 for _, moduleName in ipairs({"TextGUI", "TargetInfo", "Radar", "SessionInfo", "Spotify"}) do
     createModule("Overlays", moduleName, overlayList)
 end
-overlayBtn.MouseButton1Click:Connect(function() overlayPanel.Visible = not overlayPanel.Visible end)
+if state.native and state.native.Overlays and state.native.Overlays.Options then
+    for name in pairs(state.native.Overlays.Options) do
+        local known = false
+        for _, existingName in ipairs({"TextGUI", "TargetInfo", "Radar", "SessionInfo", "Spotify"}) do
+            if name == (overlayNames[existingName] or existingName) then known = true; break end
+        end
+        if not known then createModule("Overlays", name, overlayList) end
+    end
+end
+overlayBtn.MouseButton1Click:Connect(function()
+    if state.mobile and not overlayPanel.Visible then
+        for _, frame in ipairs(state.panels) do if frame ~= main then frame.Visible = false end end
+        clampFrame(overlayPanel, 14, 60)
+    end
+    overlayPanel.Visible = not overlayPanel.Visible
+end)
 mainLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
     main.Size = UDim2.fromOffset(220, 40 + mainLayout.AbsoluteContentSize.Y)
 end)
 main.Size = UDim2.fromOffset(220, 40 + mainLayout.AbsoluteContentSize.Y)
+main:GetPropertyChangedSignal("Size"):Connect(function() clampFrame(main) end)
 
 -- Search, inspired by the original floating search box and Legit switch.
 local search = make("Frame", {BackgroundColor3 = Color3.fromRGB(22, 21, 22),
@@ -517,13 +804,19 @@ legit.MouseButton1Click:Connect(function()
 end)
 
 -- General settings drawer: local display settings only.
-local settingsPanel = panel("Settings", 244, 60, 240, 535)
+local settingsPanel = panel("Settings", 244, 60, 240, 625)
 local settingsIcon = icon(settingsPanel, "settings", "⚙", 13, 13, 14, 14)
 tint(settingsIcon, state.text)
 local hideSettings = btn(settingsPanel, "×", 202, 0, 36, 40)
 hideSettings.TextSize = 20
 hideSettings.MouseButton1Click:Connect(function() settingsPanel.Visible = false end)
-settingsButton.MouseButton1Click:Connect(function() settingsPanel.Visible = not settingsPanel.Visible end)
+settingsButton.MouseButton1Click:Connect(function()
+    if state.mobile and not settingsPanel.Visible then
+        for _, frame in ipairs(state.panels) do if frame ~= main then frame.Visible = false end end
+        clampFrame(settingsPanel, 14, 60)
+    end
+    settingsPanel.Visible = not settingsPanel.Visible
+end)
 bindText(label(settingsPanel, "GENERAL", 13, 52, 210, 24, 11, Color3.fromRGB(119, 119, 119)), "GENERAL")
 line(settingsPanel, 79)
 bindText(label(settingsPanel, "Rebind GUI", 13, 89, 150, 27, 13), "Rebind GUI")
@@ -559,10 +852,11 @@ for _, control in ipairs({down, up}) do
     control.BackgroundTransparency = 0; control.BackgroundColor3 = Color3.fromRGB(37, 36, 37)
     corner(control, 3)
 end
+local adaptSettings
 local function updateScale(n)
     userScale = math.clamp(n, 0.7, 1.2)
     fit()
-    surface.Size = UDim2.fromScale(1 / scale.Scale, 1 / scale.Scale)
+    if adaptSettings then adaptSettings() end
     scaleLabel.Text = tostring(math.floor(userScale * 100)) .. "%"
 end
 down.MouseButton1Click:Connect(function() updateScale(userScale - 0.1) end)
@@ -599,9 +893,56 @@ for index, option in ipairs({{label = "English", code = "en"},
     end)
 end
 line(settingsPanel, 458)
-bindText(label(settingsPanel, "UI DEMO ONLY", 13, 470, 200, 23, 11, state.accent), "UI DEMO ONLY")
-bindText(label(settingsPanel, "Modules change their visual state only.", 13, 496, 217, 24, 11, state.dim),
-    "Modules change their visual state only.")
+bindText(label(settingsPanel, "UI Opacity", 13, 468, 190, 25, 13), "UI Opacity")
+local opacityAmount = label(settingsPanel, "0%", 171, 468, 54, 25, 12, state.dim)
+local lessOpacity = btn(settingsPanel, "−", 135, 500, 35, 30)
+local moreOpacity = btn(settingsPanel, "+", 179, 500, 35, 30)
+for _, control in ipairs({lessOpacity, moreOpacity}) do
+    control.BackgroundTransparency = 0
+    control.BackgroundColor3 = Color3.fromRGB(37, 36, 37)
+    corner(control, 3)
+end
+local function setOpacity(value)
+    state.opacity = math.clamp(math.floor(value * 100 + 0.5) / 100, 0, 0.75)
+    opacityAmount.Text = tostring(math.floor(state.opacity * 100 + 0.5)) .. "%"
+    for _, entry in ipairs(state.backgrounds) do
+        local obj = entry.object
+        if obj.Parent then obj.BackgroundTransparency = math.max(entry.base, state.opacity) end
+    end
+end
+lessOpacity.MouseButton1Click:Connect(function() setOpacity(state.opacity - 0.1) end)
+moreOpacity.MouseButton1Click:Connect(function() setOpacity(state.opacity + 0.1) end)
+line(settingsPanel, 554)
+bindText(label(settingsPanel, "UI / Native Bridge", 13, 566, 200, 23, 11, state.accent), "UI / Native Bridge")
+bindText(label(settingsPanel, "Blatant & Overlays use original runtime.", 13, 592, 217, 24, 11, state.dim),
+    "Blatant & Overlays use original runtime.")
+-- Only the settings body scrolls: the header stays visible on short phone screens.
+local settingsScroll = make("ScrollingFrame", {BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(0, 41), Size = UDim2.new(1, 0, 1, -41),
+    CanvasSize = UDim2.fromOffset(0, 590), BorderSizePixel = 0,
+    ScrollBarThickness = 2, ScrollBarImageTransparency = 0.7}, settingsPanel)
+local settingsBody = make("Frame", {BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(0, -41), Size = UDim2.fromOffset(240, 625)}, settingsScroll)
+for _, child in ipairs(settingsPanel:GetChildren()) do
+    if child:IsA("GuiObject") and child ~= settingsScroll and child.Position.Y.Offset > 40 then
+        child.Parent = settingsBody
+    end
+end
+adaptSettings = function()
+    settingsPanel.Size = UDim2.fromOffset(240, math.min(625, math.max(300, state.virtualH - 16)))
+    clampFrame(settingsPanel)
+end
+adaptSettings()
+onLanguageChange(function()
+    if state.language == "zh-CN" then
+        -- Real upstream modules are not translated by this shell.
+        notify("暴力模块由原版运行核心执行，原版设置保留英文")
+    end
+end)
+-- Update height when resolution/orientation changes.
+if workspace.CurrentCamera then
+    table.insert(state.connections, workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(adaptSettings))
+end
 function api:SetLanguage(code)
     if code ~= "en" and code ~= "zh-CN" then return false, "unsupported language" end
     state.language = code
@@ -622,14 +963,84 @@ function api:CreateModule(categoryName, name)
     if not category then return nil, "unknown category" end
     return createModule(categoryName, name, category.Content)
 end
+local launcher = btn(ui, "V4", 0, 0, 48, 48)
+launcher.AnchorPoint = Vector2.new(1, 1)
+launcher.Position = UDim2.new(1, -14, 1, -14)
+launcher.BackgroundTransparency = 0.08
+launcher.BackgroundColor3 = state.main
+launcher.TextColor3 = state.accent
+launcher.TextSize = 18
+launcher.Visible = false
+corner(launcher, 10); border(launcher)
+launcher.MouseButton1Click:Connect(function() api:SetVisible(true) end)
+local mobileBack = btn(surface, "☰", 0, 14, 40, 38)
+mobileBack.BackgroundTransparency = 0.08
+mobileBack.BackgroundColor3 = state.main
+mobileBack.TextColor3 = state.accent
+mobileBack.TextSize = 21
+corner(mobileBack, 6); border(mobileBack)
+state.mobileBack = mobileBack
+mobileBack.MouseButton1Click:Connect(function()
+    for _, frame in ipairs(state.panels) do
+        if frame ~= main then frame.Visible = false end
+    end
+    main.Visible = true
+end)
+fit()
+local visibilitySequence = 0
 function api:SetVisible(visible)
     state.open = not not visible
-    surface.Visible = state.open
+    visibilitySequence += 1
+    local sequence = visibilitySequence
+    if state.open then
+        surface.Visible = true
+        launcher.Visible = false
+        surfaceMotion.Scale = 0.96
+        animate(surfaceMotion, {Scale = 1}, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    else
+        launcher.Visible = true
+        animate(surfaceMotion, {Scale = 0.97}, 0.17, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        task.delay(0.18, function()
+            if sequence == visibilitySequence and not state.open and surface.Parent then
+                surface.Visible = false
+                surfaceMotion.Scale = 1
+            end
+        end)
+    end
 end
 function api:Destroy()
+    if state.activeSettings and state.activeSettings.Close then state.activeSettings.Close() end
     for _, connection in ipairs(state.connections) do connection:Disconnect() end
     ui:Destroy()
     if environment.__VapeUIClone == self then environment.__VapeUIClone = nil end
+end
+-- Keep native overlay windows inside the actual viewport too (native GUI uses its own UIScale).
+if state.native and state.native.gui then
+    local nativeScaled = state.native.gui:FindFirstChild("ScaledGui")
+    if nativeScaled then
+        local nativeScale = nativeScaled:FindFirstChildOfClass("UIScale")
+        for _, win in ipairs(nativeScaled:GetChildren()) do
+            if win:IsA("GuiObject") and win.Name:sub(-7) == "Overlay" then
+                local reentrant = false
+                local function bound()
+                    if reentrant or not win.Parent then return end
+                    local camera = workspace.CurrentCamera
+                    if not camera then return end
+                    local sc = nativeScale and nativeScale.Scale or 1
+                    local width, height = camera.ViewportSize.X / sc, camera.ViewportSize.Y / sc
+                    local x = math.clamp(win.Position.X.Offset, 0, math.max(0, width - win.Size.X.Offset))
+                    local y = math.clamp(win.Position.Y.Offset, 0, math.max(0, height - math.max(win.Size.Y.Offset, 41)))
+                    if x ~= win.Position.X.Offset or y ~= win.Position.Y.Offset then
+                        reentrant = true
+                        win.Position = UDim2.fromOffset(x, y)
+                        reentrant = false
+                    end
+                end
+                table.insert(state.connections, win:GetPropertyChangedSignal("Position"):Connect(bound))
+                bound()
+            end
+        end
+    end
 end
 local shortcut = UIS.InputBegan:Connect(function(input, processed)
     if processed or UIS:GetFocusedTextBox() then return end
@@ -637,12 +1048,39 @@ local shortcut = UIS.InputBegan:Connect(function(input, processed)
 end)
 table.insert(state.connections, shortcut)
 environment.__VapeUIClone = api
+if state.native then
+    task.spawn(function()
+        while ui.Parent and state.native do
+            for _, module in pairs(state.modules) do
+                if module.Category == "Blatant" or module.Category == "Overlays" then
+                    local original = nativeFor(module)
+                    if original then
+                        local enabled = original.Enabled == true
+                        if module.Enabled ~= enabled then
+                            module.Enabled = enabled
+                            module.Row.BackgroundColor3 = enabled and state.accent or state.main
+                        end
+                        if module.Category == "Overlays" and enabled then
+                            local win = overlayWindow(overlayNames[module.Name] or module.Name)
+                            if win then win.Visible = true end
+                        end
+                    end
+                end
+            end
+            task.wait(0.7)
+        end
+    end)
+end
 
 -- Preview two categories while keeping other windows closed; no module is enabled by default.
-state.windows.Combat.Frame.Visible = true
-state.windows.Blatant.Frame.Visible = true
-state.windows.Combat.Nav.TextColor3 = state.accent
-state.windows.Blatant.Nav.TextColor3 = state.accent
-notify(state.language == "zh-CN" and "Vape V4 界面已加载 · 仅视觉演示"
-    or "Vape V4 UI study loaded · visual-only shell")
+state.windows.Combat.Frame.Visible = not state.mobile
+state.windows.Blatant.Frame.Visible = not state.mobile
+if not state.mobile then
+    state.windows.Combat.Nav.TextColor3 = state.accent
+    state.windows.Blatant.Nav.TextColor3 = state.accent
+end
+notify(state.native and (state.language == "zh-CN" and "UI 已打开 · 原版模块已接入"
+    or "UI opened · native modules connected")
+    or (state.language == "zh-CN" and "UI 已打开 · 原版运行核心未加载"
+    or "UI opened · native runtime unavailable"))
 return api
